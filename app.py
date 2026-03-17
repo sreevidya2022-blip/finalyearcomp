@@ -14,7 +14,6 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
-
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 # Load pre-trained models on startup
