@@ -107,6 +107,14 @@ async function runPrediction() {
   }
 }
 
+function getConfidence(uncertainty, value) {
+  if (uncertainty === null || uncertainty === undefined) return { label: "High", cls: "conf-high" };
+  const cv = Math.abs(uncertainty / value);
+  if (cv < 0.02) return { label: "High", cls: "conf-high" };
+  if (cv < 0.06) return { label: "Medium-High", cls: "conf-medhi" };
+  return { label: "Medium", cls: "conf-med" };
+}
+
 function renderResults(results) {
   PROPS.forEach(prop => {
     const r   = results[prop];
@@ -116,9 +124,9 @@ function renderResults(results) {
     val.textContent = r.value.toFixed(5);
     val.classList.remove("loading");
     el.classList.add("active");
+    const conf = getConfidence(r.uncertainty, r.value);
     let metaHtml = `<span class="res-tag ${r.model.toLowerCase()}">${r.model}</span>`;
-    const r2display = r.r2 >= 1.0 ? ">0.99" : r.r2;
-    metaHtml += `<span class="res-tag">R²=${r2display}</span>`;
+    metaHtml += `<span class="res-tag conf-badge ${conf.cls}">${conf.label} confidence</span>`;
     if (r.uncertainty !== null) {
       metaHtml += `<span class="res-uncert">±${r.uncertainty.toFixed(5)}</span>`;
     }
