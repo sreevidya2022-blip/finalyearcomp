@@ -7,7 +7,6 @@ warnings.filterwarnings("ignore")
 
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern, WhiteKernel, ConstantKernel
-from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import r2_score
 from sklearn.model_selection import LeaveOneOut
 
@@ -18,14 +17,6 @@ EXP_W      = 0.90
 BN_MIN, BN_MAX = 2.5, 7.5
 AO_MIN, AO_MAX = 2.5, 7.5
 MODEL_PATH = "models/trained_models.pkl"
-
-
-def _clamp(value, exp_data, prop):
-    """Clamp predicted value to 5% beyond experimental min/max."""
-    vals = [d[prop] for d in exp_data]
-    lo = min(vals) * 0.95
-    hi = max(vals) * 1.05
-    return max(lo, min(hi, value))
 
 
 def load_data(theory_path, fea_path, exp_path):
@@ -52,21 +43,6 @@ def load_data(theory_path, fea_path, exp_path):
     return df_theory, df_fea, df_exp
 
 
-def make_Xy(prop, df_theory, df_fea, df_exp):
-    exp     = df_exp[["BN", "AO", prop]].dropna()
-    bg_list = [df_theory[["BN", "AO", prop]].dropna()]
-    if prop == "Tensile":
-        bg_list.append(df_fea[["BN", "AO", prop]].dropna())
-    bg  = pd.concat(bg_list, ignore_index=True)
-    we  = np.full(len(exp), EXP_W / len(exp))
-    wb  = np.full(len(bg),  (1 - EXP_W) / len(bg))
-    X   = np.vstack([exp[["BN", "AO"]].values, bg[["BN", "AO"]].values])
-    y   = np.concatenate([exp[prop].values, bg[prop].values])
-    sw  = np.concatenate([we, wb])
-    sw /= sw.mean()
-    return X, y, sw, exp[["BN", "AO"]].values, exp[prop].values
-
-
 def build_gpr(X, y):
     k = ConstantKernel(1.0) * Matern(length_scale=1.5, nu=2.5) + WhiteKernel(0.01)
     m = GaussianProcessRegressor(kernel=k, n_restarts_optimizer=3,
@@ -75,14 +51,8 @@ def build_gpr(X, y):
     return m
 
 
-def build_gbm(X, y, sw=None):
-    m = GradientBoostingRegressor(n_estimators=60, max_depth=3,
-                                  learning_rate=0.1, random_state=42)
-    m.fit(X, y, sample_weight=sw)
-    return m
-
-
 def _r2_gpr_loo(X, y):
+    """Leave-one-out CV R² for GPR."""
     if len(X) < 3:
         return float("nan")
     loo = LeaveOneOut()
@@ -95,14 +65,6 @@ def _r2_gpr_loo(X, y):
     return round(float(score), 4)
 
 
-def _r2_gbm_weighted(X, y, sw, mdl):
-    y_hat = mdl.predict(X)
-    w = sw / sw.sum()
-    ss_res = float(np.sum(w * (y - y_hat) ** 2))
-    ss_tot = float(np.sum(w * (y - np.dot(w, y)) ** 2))
-    return round(1.0 - ss_res / (ss_tot + 1e-12), 4)
-
-
 def train_models(theory_path, fea_path, exp_path):
     os.makedirs("models", exist_ok=True)
     df_theory, df_fea, df_exp = load_data(theory_path, fea_path, exp_path)
@@ -111,25 +73,20 @@ def train_models(theory_path, fea_path, exp_path):
     all_r2      = {}
 
     for prop in TARGETS:
-        X_all, y_all, sw, Xe, ye = make_Xy(prop, df_theory, df_fea, df_exp)
+        exp = df_exp[["BN", "AO", prop]].dropna()
+        Xe  = exp[["BN", "AO"]].values
+        ye  = exp[prop].values
 
         mdl_gpr = build_gpr(Xe, ye)
-        mdl_gbm = build_gbm(X_all, y_all, sw)
+        r2_gpr  = _r2_gpr_loo(Xe, ye)
 
-        r2_gpr = _r2_gpr_loo(Xe, ye)
-        r2_gbm = _r2_gbm_weighted(X_all, y_all, sw, mdl_gbm)
-
-        all_r2[prop] = {"GPR": round(r2_gpr, 4), "GBM": round(r2_gbm, 4)}
-
-        if r2_gpr >= r2_gbm:
-            best_models[prop] = ("GPR", mdl_gpr)
-        else:
-            best_models[prop] = ("GBM", mdl_gbm)
+        all_r2[prop]      = {"GPR": round(r2_gpr, 4)}
+        best_models[prop] = ("GPR", mdl_gpr)
 
     payload = {
-        "models":     best_models,
-        "all_r2":     all_r2,
-        "exp_data":   df_exp[["BN", "AO"] + TARGETS].to_dict(orient="records"),
+        "models":   best_models,
+        "all_r2":   all_r2,
+        "exp_data": df_exp[["BN", "AO"] + TARGETS].to_dict(orient="records"),
     }
     with open(MODEL_PATH, "wb") as f:
         pickle.dump(payload, f)
@@ -147,27 +104,16 @@ def load_models():
 def predict(bn, ao, payload):
     xi = np.array([[bn, ao]])
     results = {}
-    exp_data = payload["exp_data"]
     for prop in TARGETS:
         name, mdl = payload["models"][prop]
-        if name == "GPR":
-            mu, std = mdl.predict(xi, return_std=True)
-            results[prop] = {
-                "value":       round(float(mu[0]), 5),
-                "uncertainty": round(float(std[0]), 5),
-                "unit":        UNITS[prop],
-                "model":       name,
-                "r2":          payload["all_r2"][prop][name],
-            }
-        else:
-            mu = _clamp(float(mdl.predict(xi)[0]), exp_data, prop)
-            results[prop] = {
-                "value":       round(mu, 5),
-                "uncertainty": None,
-                "unit":        UNITS[prop],
-                "model":       name,
-                "r2":          payload["all_r2"][prop][name],
-            }
+        mu, std = mdl.predict(xi, return_std=True)
+        results[prop] = {
+            "value":       round(float(mu[0]), 5),
+            "uncertainty": round(float(std[0]), 5),
+            "unit":        UNITS[prop],
+            "model":       "GPR",
+            "r2":          payload["all_r2"][prop]["GPR"],
+        }
     return results
 
 
@@ -176,7 +122,6 @@ def inverse_predict(targets, payload, weights=None, grid_size=150):
     ao_vals = np.linspace(AO_MIN, AO_MAX, grid_size)
     BN_grid, AO_grid = np.meshgrid(bn_vals, ao_vals)
     X_grid = np.column_stack([BN_grid.ravel(), AO_grid.ravel()])
-    exp_data = payload["exp_data"]
 
     active_props = [p for p, v in targets.items() if v is not None]
     if not active_props:
@@ -188,12 +133,7 @@ def inverse_predict(targets, payload, weights=None, grid_size=150):
     pred_matrix = {}
     for prop in active_props:
         name, mdl = payload["models"][prop]
-        if name == "GPR":
-            mu, _ = mdl.predict(X_grid, return_std=True)
-        else:
-            mu = mdl.predict(X_grid)
-            vals = [d[prop] for d in exp_data]
-            mu = np.clip(mu, min(vals) * 0.95, max(vals) * 1.05)
+        mu, _ = mdl.predict(X_grid, return_std=True)
         pred_matrix[prop] = mu
 
     total_error = np.zeros(len(X_grid))
@@ -212,24 +152,14 @@ def inverse_predict(targets, payload, weights=None, grid_size=150):
     achieved = {}
     for prop in TARGETS:
         name, mdl = payload["models"][prop]
-        if name == "GPR":
-            mu, std = mdl.predict(xi, return_std=True)
-            achieved[prop] = {
-                "value":       round(float(mu[0]), 5),
-                "uncertainty": round(float(std[0]), 5),
-                "unit":        UNITS[prop],
-                "model":       name,
-                "r2":          payload["all_r2"][prop][name],
-            }
-        else:
-            mu = _clamp(float(mdl.predict(xi)[0]), exp_data, prop)
-            achieved[prop] = {
-                "value":       round(mu, 5),
-                "uncertainty": None,
-                "unit":        UNITS[prop],
-                "model":       name,
-                "r2":          payload["all_r2"][prop][name],
-            }
+        mu, std = mdl.predict(xi, return_std=True)
+        achieved[prop] = {
+            "value":       round(float(mu[0]), 5),
+            "uncertainty": round(float(std[0]), 5),
+            "unit":        UNITS[prop],
+            "model":       "GPR",
+            "r2":          payload["all_r2"][prop]["GPR"],
+        }
 
     per_prop_error = {
         prop: round(abs(achieved[prop]["value"] - targets[prop]), 6)
@@ -250,25 +180,13 @@ def inverse_predict(targets, payload, weights=None, grid_size=150):
 
 def get_pd_curves(bn, ao, payload):
     sweep = np.linspace(BN_MIN, BN_MAX, 40)
-    exp_data = payload["exp_data"]
     curves = {}
     for prop in TARGETS:
         name, mdl = payload["models"][prop]
         bn_sw = np.column_stack([sweep, np.full(40, ao)])
         ao_sw = np.column_stack([np.full(40, bn), sweep])
-        if name == "GPR":
-            mu_bn, sd_bn = mdl.predict(bn_sw, return_std=True)
-            mu_ao, sd_ao = mdl.predict(ao_sw, return_std=True)
-        else:
-            mu_bn = mdl.predict(bn_sw)
-            mu_ao = mdl.predict(ao_sw)
-            vals = [d[prop] for d in exp_data]
-            lo = min(vals) * 0.95
-            hi = max(vals) * 1.05
-            mu_bn = np.clip(mu_bn, lo, hi)
-            mu_ao = np.clip(mu_ao, lo, hi)
-            sd_bn = np.zeros(40)
-            sd_ao = np.zeros(40)
+        mu_bn, sd_bn = mdl.predict(bn_sw, return_std=True)
+        mu_ao, sd_ao = mdl.predict(ao_sw, return_std=True)
         curves[prop] = {
             "sweep":  sweep.tolist(),
             "bn_mu":  mu_bn.tolist(), "bn_sd": sd_bn.tolist(),
