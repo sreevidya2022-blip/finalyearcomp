@@ -18,7 +18,7 @@ CORS(app)
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 # Load pre-trained models on startup
-_payload = load_models()
+_payload = None
 
 
 def get_payload():
