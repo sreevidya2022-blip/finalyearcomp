@@ -338,3 +338,9 @@ input[type=range]::-webkit-slider-thumb {
   .mode-tabs { flex-direction: column; }
   .inv-achieved-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* Confidence badges */
+.conf-badge { font-weight: 500; }
+.conf-high   { color: #00e5a0; border-color: rgba(0,229,160,0.3) !important; background: rgba(0,229,160,0.08) !important; }
+.conf-medhi  { color: #3d9eff; border-color: rgba(61,158,255,0.3) !important; background: rgba(61,158,255,0.08) !important; }
+.conf-med    { color: #f5a623; border-color: rgba(245,166,35,0.3) !important; background: rgba(245,166,35,0.08) !important; }
