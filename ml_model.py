@@ -20,6 +20,14 @@ AO_MIN, AO_MAX = 2.5, 7.5
 MODEL_PATH = "models/trained_models.pkl"
 
 
+def _clamp(value, exp_data, prop):
+    """Clamp predicted value to 5% beyond experimental min/max."""
+    vals = [d[prop] for d in exp_data]
+    lo = min(vals) * 0.95
+    hi = max(vals) * 1.05
+    return max(lo, min(hi, value))
+
+
 def load_data(theory_path, fea_path, exp_path):
     df_theory_raw = pd.read_excel(theory_path)
     ycol = [c for c in df_theory_raw.columns if "modulus" in str(c).lower()][0]
@@ -75,8 +83,6 @@ def build_gbm(X, y, sw=None):
 
 
 def _r2_gpr_loo(X, y):
-    """Leave-one-out CV R² for GPR — honest estimate with only 9 experimental points.
-    Avoids the R²=1 artifact that comes from evaluating GPR on its own training data."""
     if len(X) < 3:
         return float("nan")
     loo = LeaveOneOut()
@@ -90,7 +96,6 @@ def _r2_gpr_loo(X, y):
 
 
 def _r2_gbm_weighted(X, y, sw, mdl):
-    """Weighted R² on full training set for GBM."""
     y_hat = mdl.predict(X)
     w = sw / sw.sum()
     ss_res = float(np.sum(w * (y - y_hat) ** 2))
@@ -142,6 +147,7 @@ def load_models():
 def predict(bn, ao, payload):
     xi = np.array([[bn, ao]])
     results = {}
+    exp_data = payload["exp_data"]
     for prop in TARGETS:
         name, mdl = payload["models"][prop]
         if name == "GPR":
@@ -154,7 +160,7 @@ def predict(bn, ao, payload):
                 "r2":          payload["all_r2"][prop][name],
             }
         else:
-            mu  = float(mdl.predict(xi)[0])
+            mu = _clamp(float(mdl.predict(xi)[0]), exp_data, prop)
             results[prop] = {
                 "value":       round(mu, 5),
                 "uncertainty": None,
@@ -166,18 +172,11 @@ def predict(bn, ao, payload):
 
 
 def inverse_predict(targets, payload, weights=None, grid_size=150):
-    """
-    Reverse prediction: given desired property values, find best BN% + AO%.
-
-    targets  : dict e.g. {"Tensile": 0.65, "Youngs": 72.0, "Hardness": 0.97, "Buckling": 850}
-               Pass None for any property to ignore it.
-    weights  : optional per-property importance weights (default equal)
-    grid_size: resolution of search grid (grid_size^2 points evaluated)
-    """
     bn_vals = np.linspace(BN_MIN, BN_MAX, grid_size)
     ao_vals = np.linspace(AO_MIN, AO_MAX, grid_size)
     BN_grid, AO_grid = np.meshgrid(bn_vals, ao_vals)
     X_grid = np.column_stack([BN_grid.ravel(), AO_grid.ravel()])
+    exp_data = payload["exp_data"]
 
     active_props = [p for p, v in targets.items() if v is not None]
     if not active_props:
@@ -186,7 +185,6 @@ def inverse_predict(targets, payload, weights=None, grid_size=150):
     if weights is None:
         weights = {p: 1.0 for p in active_props}
 
-    # Predict all active properties across the entire grid
     pred_matrix = {}
     for prop in active_props:
         name, mdl = payload["models"][prop]
@@ -194,9 +192,10 @@ def inverse_predict(targets, payload, weights=None, grid_size=150):
             mu, _ = mdl.predict(X_grid, return_std=True)
         else:
             mu = mdl.predict(X_grid)
+            vals = [d[prop] for d in exp_data]
+            mu = np.clip(mu, min(vals) * 0.95, max(vals) * 1.05)
         pred_matrix[prop] = mu
 
-    # Normalised weighted MSE — divide by predicted range so units don't dominate
     total_error = np.zeros(len(X_grid))
     for prop in active_props:
         pmin = pred_matrix[prop].min()
@@ -209,7 +208,6 @@ def inverse_predict(targets, payload, weights=None, grid_size=150):
     best_bn  = float(X_grid[best_idx, 0])
     best_ao  = float(X_grid[best_idx, 1])
 
-    # Get achieved values at best point
     xi = np.array([[best_bn, best_ao]])
     achieved = {}
     for prop in TARGETS:
@@ -224,7 +222,7 @@ def inverse_predict(targets, payload, weights=None, grid_size=150):
                 "r2":          payload["all_r2"][prop][name],
             }
         else:
-            mu = float(mdl.predict(xi)[0])
+            mu = _clamp(float(mdl.predict(xi)[0]), exp_data, prop)
             achieved[prop] = {
                 "value":       round(mu, 5),
                 "uncertainty": None,
@@ -252,6 +250,7 @@ def inverse_predict(targets, payload, weights=None, grid_size=150):
 
 def get_pd_curves(bn, ao, payload):
     sweep = np.linspace(BN_MIN, BN_MAX, 40)
+    exp_data = payload["exp_data"]
     curves = {}
     for prop in TARGETS:
         name, mdl = payload["models"][prop]
@@ -261,8 +260,15 @@ def get_pd_curves(bn, ao, payload):
             mu_bn, sd_bn = mdl.predict(bn_sw, return_std=True)
             mu_ao, sd_ao = mdl.predict(ao_sw, return_std=True)
         else:
-            mu_bn = mdl.predict(bn_sw); sd_bn = np.zeros(40)
-            mu_ao = mdl.predict(ao_sw); sd_ao = np.zeros(40)
+            mu_bn = mdl.predict(bn_sw)
+            mu_ao = mdl.predict(ao_sw)
+            vals = [d[prop] for d in exp_data]
+            lo = min(vals) * 0.95
+            hi = max(vals) * 1.05
+            mu_bn = np.clip(mu_bn, lo, hi)
+            mu_ao = np.clip(mu_ao, lo, hi)
+            sd_bn = np.zeros(40)
+            sd_ao = np.zeros(40)
         curves[prop] = {
             "sweep":  sweep.tolist(),
             "bn_mu":  mu_bn.tolist(), "bn_sd": sd_bn.tolist(),
