@@ -117,7 +117,8 @@ function renderResults(results) {
     val.classList.remove("loading");
     el.classList.add("active");
     let metaHtml = `<span class="res-tag ${r.model.toLowerCase()}">${r.model}</span>`;
-    metaHtml += `<span class="res-tag">R²=${r.r2}</span>`;
+    const r2display = r.r2 >= 1.0 ? ">0.99" : r.r2;
+    metaHtml += `<span class="res-tag">R²=${r2display}</span>`;
     if (r.uncertainty !== null) {
       metaHtml += `<span class="res-uncert">±${r.uncertainty.toFixed(5)}</span>`;
     }
